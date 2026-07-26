@@ -7,36 +7,106 @@ import type {
 	OptimizeLyricOptions,
 } from "#interfaces";
 import styles from "#styles/lyric-player.module.css";
-import { clampPositive } from "#utils/clamp.ts";
+import { clamp, clampPositive } from "#utils/clamp.ts";
 import { optimizeLyricLines } from "#utils/optimize-lyric.ts";
 import type { SpringParams } from "#utils/spring.ts";
 import { InterludeDots } from "../dom/interlude-dots.ts";
 import { BottomLineEl } from "./bottom-line.ts";
 import { LayoutAlignAnchor, MaskObsceneWordsMode } from "./consts.ts";
 import type { LyricLineGroupBase } from "./group.ts";
-import {
-	computeCurrentInterlude,
-	computeGroupPresentation,
-	computeLineBlur,
-	computeLinePosYSpringParams,
-	type PlayerLayoutState,
-} from "./layout.ts";
 import type { LyricLineBase } from "./line.ts";
-import {
-	attachPlayerScrollHandlers,
-	type PlayerScrollState,
-	resetPlayerScrollState,
-} from "./scroll.ts";
-import {
-	commitPlayerTimeState,
-	computePlayerTimeState,
-	type PlayerTimelineState,
-} from "./timeline.ts";
 
-export type { PlayerLayoutState } from "./layout.ts";
 export type { LyricLineBase } from "./line.ts";
-export type { PlayerScrollState } from "./scroll.ts";
-export type { PlayerTimelineState } from "./timeline.ts";
+
+/**
+ * 播放器布局状态。
+ *
+ * 这部分状态保存布局计算阶段所需的配置项与缓存值，
+ * 例如对齐方式、间奏点尺寸、上一轮布局命中的目标行等。
+ * 不描述播放时间线或用户滚动交互，仅记录当前歌词排布。
+ */
+interface PlayerLayoutState {
+	/** 间奏点元素当前测量得到的尺寸 */
+	interludeDotsSize: [number, number];
+	/** 上一轮布局实际对齐的目标歌词行索引 */
+	targetAlignIndex: number;
+	/** 上一轮布局时是否处于间奏区间 */
+	lastInterludeState: boolean;
+	/** 当前歌词目标行的对齐锚点 */
+	alignAnchor: LayoutAlignAnchor;
+	/** 当前歌词目标行在播放器高度中的相对对齐位置 */
+	alignPosition: number;
+	/** 视口上下额外保留的预渲染距离，单位为像素 */
+	overscanPx: number;
+	/** 上一轮布局时的 seeking 状态 */
+	lastIsSeeking: boolean;
+}
+
+/**
+ * 当前命中的间奏区间信息。
+ *
+ * 当播放器检测到当前时间处于两句歌词之间的较长空档期时，
+ * 会生成该结构，用于驱动间奏点动画的显示位置与时间范围。
+ */
+interface PlayerInterlude {
+	/** 间奏动画的开始时间 */
+	startTime: number;
+	/** 间奏动画的结束时间 */
+	endTime: number;
+	/** 间奏点应插入到哪一行之后；`-1` 表示位于第一行之前 */
+	anchorLineIndex: number;
+	/** 间奏结束后的下一句是否为对唱歌词 */
+	isNextDuet: boolean;
+}
+
+/**
+ * 播放时间线状态。
+ *
+ * 描述播放器在时间轴上的当前位置，当前处于激活状态的歌词组信息
+ */
+interface PlayerTimelineState {
+	/** 当前播放时间，单位为毫秒 */
+	currentTime: number;
+	/** 上一次提交到时间线状态的播放时间，单位为毫秒 */
+	lastCurrentTime: number;
+	/** 热行：当前时间 {@link currentTime} 正在命中的组（含主行+可能的背景行） */
+	hotGroups: Set<number>;
+	/** 缓冲组：UI 上还保持激活表现的组索引，通常包含热组，和刚结束仍在过渡中的组 */
+	bufferedGroups: Set<number>;
+	/** 当前应滚动对齐到的歌词组索引 */
+	scrollToIndex: number;
+	/** 是否正在拖拽进度条。若是，更新时丢弃缓冲行，并根据当前时间直接计算热行 */
+	isSeeking: boolean;
+	/** 是否处于播放状态 */
+	isPlaying: boolean;
+	/** 是否已经完成至少一次初始布局 */
+	initialLayoutFinished: boolean;
+	/** 当前是否处于间奏期间 */
+	activeInterlude?: PlayerInterlude;
+}
+
+/**
+ * 播放器滚动状态。
+ *
+ * 这部分状态描述用户手势/滚轮滚动产生的临时偏移，以及当前允许滚动的范围。
+ */
+interface PlayerScrollState {
+	/** 允许的滚动偏移范围 */
+	scrollBoundary: {
+		/** 允许的最小偏移量 */
+		minOffset: number;
+		/** 允许的最大偏移量 */
+		maxOffset: number;
+	};
+	/** 当前用户滚动带来的额外偏移量 */
+	scrollOffset: number;
+	/** 是否允许用户通过手势或滚轮滚动歌词视图 */
+	allowScroll: boolean;
+	/** 是否处于用户滚动过，尚未回归自动对齐的状态 */
+	isScrolled: boolean;
+	/** 是否正在进行滚动交互或惯性滚动 */
+	isUserScrolling: boolean;
+}
 
 /**
  * 歌词播放器的基类，已经包含了有关歌词操作和排版的功能，
@@ -59,7 +129,16 @@ export abstract class LyricPlayerBase
 		isSeeking: false,
 		isPlaying: true,
 		initialLayoutFinished: false,
+		activeInterlude: undefined,
 	};
+
+	private tempAddedIds: number[] = [];
+	private tempRemovedHotIds: number[] = [];
+	private tempRemovedBufferedIds: number[] = [];
+
+	private hasBottomContent = false;
+	private bottomLineObserver: MutationObserver;
+
 	/** @internal */
 	lyricGroupElementMap: WeakMap<Element, LyricLineGroupBase> = new WeakMap();
 	protected currentLyricLines: LyricLine[] = [];
@@ -75,6 +154,7 @@ export abstract class LyricPlayerBase
 		alignAnchor: LayoutAlignAnchor.Center,
 		alignPosition: 0.35,
 		overscanPx: 300,
+		lastIsSeeking: false,
 	};
 	protected interludeDots: InterludeDots = new InterludeDots();
 	protected bottomLine: BottomLineEl = new BottomLineEl(this);
@@ -91,6 +171,24 @@ export abstract class LyricPlayerBase
 		isScrolled: false,
 		isUserScrolling: false,
 	};
+
+	/** 5秒后恢复自动滚动对齐的定时器 */
+	private _scrolledHandler: ReturnType<typeof setTimeout> | undefined;
+
+	/** 惯性滚动动画帧的 ID */
+	private _inertiaRafId: number = 0;
+
+	/** 触摸和手势滚动的瞬时计算状态 */
+	private _touchGestureState = {
+		startScrollY: 0,
+		startTouchPosY: 0,
+		startTouchStartX: 0,
+		startTouchStartY: 0,
+		lastMoveY: 0,
+		startScrollTime: 0,
+		scrollSpeed: 0,
+	};
+
 	public currentLyricGroups: LyricLineGroupBase[] = [];
 	lyricGroupSize: WeakMap<LyricLineGroupBase, [number, number]> = new WeakMap();
 	readonly size: [number, number] = [0, 0];
@@ -127,7 +225,6 @@ export abstract class LyricPlayerBase
 	private onPageHide = () => {
 		this.isPageVisible = false;
 	};
-	private scrolledHandler: ReturnType<typeof setTimeout> | undefined;
 	/** @internal */
 	resizeObserver: ResizeObserver = new ResizeObserver(((entries) => {
 		let shouldRelayout = false;
@@ -194,30 +291,208 @@ export abstract class LyricPlayerBase
 		this.element.appendChild(this.bottomLine.getElement());
 		this.interludeDots.setTransform(0, 200);
 
+		this.bottomLineObserver = new MutationObserver(() => {
+			const bottomEl = this.bottomLine.getElement();
+			this.hasBottomContent = bottomEl.innerHTML.trim().length > 0;
+		});
+		this.bottomLineObserver.observe(this.bottomLine.getElement(), {
+			childList: true,
+			characterData: true,
+			subtree: true,
+		});
+
 		window.addEventListener("pageshow", this.onPageShow);
 		window.addEventListener("pagehide", this.onPageHide);
-		attachPlayerScrollHandlers(this.element, this.scrollState, {
-			onBeginScroll: () => this.beginScrollHandler(),
-			onEndScroll: () => this.endScrollHandler(),
-			onLayout: (sync, force) => this.calcLayout(sync, force),
-			containsTarget: (target) => this.element.contains(target),
-			clickTarget: (target) => target.click(),
+
+		this.element.addEventListener("touchstart", this.onTouchStart, {
+			passive: false,
+		});
+		this.element.addEventListener("touchmove", this.onTouchMove, {
+			passive: false,
+		});
+		this.element.addEventListener("touchend", this.onTouchEnd, {
+			passive: false,
+		});
+		this.element.addEventListener("wheel", this.onWheel, {
+			passive: false,
 		});
 	}
 
-	private beginScrollHandler() {
-		const allowed = this.scrollState.allowScroll;
-		if (allowed) {
-			this.scrollState.isScrolled = true;
-			clearTimeout(this.scrolledHandler);
-			this.scrolledHandler = setTimeout(() => {
-				this.scrollState.isScrolled = false;
-				this.scrollState.scrollOffset = 0;
-			}, 5000);
+	/**
+	 * 检查是否允许滚动，并重置 {@link _scrolledHandler}
+	 * @returns 是否允许本次滚动
+	 */
+	private checkAndBeginUserScroll(): boolean {
+		if (!this.scrollState.allowScroll) {
+			return false;
 		}
-		return allowed;
+
+		this.scrollState.isScrolled = true;
+		clearTimeout(this._scrolledHandler);
+
+		this._scrolledHandler = setTimeout(() => {
+			this.scrollState.isScrolled = false;
+			this.scrollState.scrollOffset = 0;
+		}, 5000);
+
+		return true;
 	}
-	private endScrollHandler() {}
+
+	/**
+	 * 结束一次滚动交互或惯性滚动
+	 */
+	private endUserScroll(): void {
+		this.scrollState.isUserScrolling = false;
+	}
+
+	/**
+	 * 将滚动偏移量限制在当前允许的边界内
+	 */
+	private clampScrollOffset(): void {
+		this.scrollState.scrollOffset = clamp(
+			this.scrollState.scrollOffset,
+			this.scrollState.scrollBoundary.minOffset,
+			this.scrollState.scrollBoundary.maxOffset,
+		);
+	}
+
+	/**
+	 * 触摸开始事件处理器
+	 */
+	private onTouchStart = (evt: TouchEvent) => {
+		// 打断未结束的惯性滚动动画
+		if (this._inertiaRafId) {
+			cancelAnimationFrame(this._inertiaRafId);
+			this._inertiaRafId = 0;
+		}
+
+		if (!this.checkAndBeginUserScroll()) return;
+
+		this.scrollState.isUserScrolling = true;
+		evt.preventDefault();
+
+		const touch = evt.touches[0];
+		const state = this._touchGestureState;
+
+		state.startScrollY = this.scrollState.scrollOffset;
+		state.startTouchPosY = touch.screenY;
+		state.lastMoveY = touch.screenY;
+		state.startTouchStartX = touch.screenX;
+		state.startTouchStartY = touch.screenY;
+		state.startScrollTime = Date.now();
+		state.scrollSpeed = 0;
+
+		this.calcLayout(true, true);
+	};
+
+	/**
+	 * 触摸滑动事件处理器
+	 */
+	private onTouchMove = (evt: TouchEvent) => {
+		if (!this.checkAndBeginUserScroll()) return;
+		evt.preventDefault();
+
+		const currentY = evt.touches[0].screenY;
+		const state = this._touchGestureState;
+
+		const deltaY = currentY - state.startTouchPosY;
+		this.scrollState.scrollOffset = state.startScrollY - deltaY;
+		this.clampScrollOffset();
+
+		const now = Date.now();
+		const dt = now - state.startScrollTime;
+		if (dt > 0) {
+			state.scrollSpeed = (currentY - state.lastMoveY) / dt;
+		}
+		state.lastMoveY = currentY;
+		state.startScrollTime = now;
+
+		this.calcLayout(true, true);
+	};
+
+	/**
+	 * 触摸结束事件处理器
+	 */
+	private onTouchEnd = (evt: TouchEvent) => {
+		if (!this.checkAndBeginUserScroll()) {
+			this.scrollState.isUserScrolling = false;
+			return;
+		}
+		evt.preventDefault();
+
+		const touch = evt.changedTouches[0];
+		const state = this._touchGestureState;
+
+		const moveX = Math.abs(touch.screenX - state.startTouchStartX);
+		const moveY = Math.abs(touch.screenY - state.startTouchStartY);
+
+		if (moveX < 10 && moveY < 10) {
+			const target = document.elementFromPoint(touch.clientX, touch.clientY);
+			if (target instanceof HTMLElement && this.element.contains(target)) {
+				target.click();
+			}
+			this.endUserScroll();
+			return;
+		}
+
+		state.startTouchPosY = 0;
+
+		if (Math.abs(state.scrollSpeed) < 0.1) {
+			state.scrollSpeed = 0;
+		}
+
+		let lastFrameTime = performance.now();
+
+		const onScrollFrame = (time: number) => {
+			if (!this.scrollState.allowScroll) {
+				this._inertiaRafId = 0;
+				this.endUserScroll();
+				return;
+			}
+
+			const dt = time - lastFrameTime;
+			lastFrameTime = time;
+
+			if (dt <= 0 || dt > 100) {
+				this._inertiaRafId = requestAnimationFrame(onScrollFrame);
+				return;
+			}
+
+			if (Math.abs(state.scrollSpeed) > 0.05) {
+				this.scrollState.scrollOffset -= state.scrollSpeed * dt;
+				this.clampScrollOffset();
+
+				const frictionFactor = 0.95 ** (dt / 16);
+				state.scrollSpeed *= frictionFactor;
+
+				this.calcLayout(true, true);
+				this._inertiaRafId = requestAnimationFrame(onScrollFrame);
+			} else {
+				this._inertiaRafId = 0;
+				this.endUserScroll();
+			}
+		};
+
+		this._inertiaRafId = requestAnimationFrame(onScrollFrame);
+	};
+
+	/**
+	 * 鼠标滚轮事件处理器
+	 */
+	private onWheel = (evt: WheelEvent) => {
+		if (!this.checkAndBeginUserScroll()) return;
+		evt.preventDefault();
+
+		if (evt.deltaMode === WheelEvent.DOM_DELTA_PIXEL) {
+			this.scrollState.scrollOffset += evt.deltaY;
+			this.clampScrollOffset();
+			this.calcLayout(true, false);
+		} else {
+			this.scrollState.scrollOffset += evt.deltaY * 50;
+			this.clampScrollOffset();
+			this.calcLayout(false, false);
+		}
+	};
 
 	/**
 	 * 设置文字动画的渐变宽度，单位以歌词行的主文字字体大小的倍数为单位，默认为 0.5，即一个全角字符的一半宽度
@@ -475,7 +750,10 @@ export abstract class LyricPlayerBase
 	 * 内部会根据调用间隔和播放进度自动决定如何滚动和显示歌词，所以这个的调用频率越快越准确越好。
 	 * 调用完成后，应每帧调用 {@link update} 方法来执行歌词动画效果。**此函数本身不会触发动画效果**。
 	 *
+	 * 当 `isSeek` 为 `true` 时，将触发重新排版，代价较高，因此请只在真正跳转时设为 `true`
+	 *
 	 * @param time 当前播放进度，单位为毫秒
+	 * @param isSeek 是否为用户手动跳转进度
 	 */
 	setCurrentTime(time: number, isSeek = false): void {
 		// 歌词行为如下：
@@ -487,35 +765,291 @@ export abstract class LyricPlayerBase
 
 		const { timelineState } = this;
 		timelineState.isSeeking = Boolean(isSeek);
+
 		timelineState.currentTime = time;
 
-		if (!timelineState.initialLayoutFinished && !timelineState.isSeeking)
+		if (!timelineState.initialLayoutFinished && !timelineState.isSeeking) {
 			return;
+		}
 
-		const stateResult = computePlayerTimeState({
-			time,
-			currentGroups: this.currentLyricGroups,
-			timelineState,
+		let shouldLayout = false;
+		let shouldResetScroll = false;
+
+		if (timelineState.isSeeking) {
+			const result = this.syncForSeek(time);
+			shouldLayout = result.shouldLayout;
+			shouldResetScroll = result.shouldResetScroll;
+		} else {
+			const result = this.syncForPlayback(time);
+			shouldLayout = result.shouldLayout;
+			shouldResetScroll = result.shouldResetScroll;
+		}
+
+		if (shouldResetScroll) this.resetScroll();
+		if (shouldLayout) this.calcLayout();
+	}
+
+	/**
+	 * 处理 Seek 时的时间线推倒
+	 *
+	 * 将会丢弃历史缓冲行，直接根据当前时间重新计算热行
+	 */
+	private syncForSeek(time: number): {
+		shouldLayout: boolean;
+		shouldResetScroll: boolean;
+	} {
+		const { timelineState, currentLyricGroups } = this;
+
+		this.tempRemovedHotIds.length = 0;
+		for (const id of timelineState.hotGroups) {
+			this.tempRemovedHotIds.push(id);
+		}
+		this.tempRemovedBufferedIds.length = 0;
+		for (const id of timelineState.bufferedGroups) {
+			if (!timelineState.hotGroups.has(id)) {
+				this.tempRemovedBufferedIds.push(id);
+			}
+		}
+
+		timelineState.hotGroups.clear();
+		timelineState.bufferedGroups.clear();
+
+		// TODO: 二分查找优化性能
+		for (let id = 0; id < currentLyricGroups.length; id++) {
+			const group = currentLyricGroups[id];
+			if (group && group.startTime <= time && group.endTime > time) {
+				timelineState.hotGroups.add(id);
+				timelineState.bufferedGroups.add(id);
+			}
+		}
+
+		if (timelineState.bufferedGroups.size > 0) {
+			timelineState.scrollToIndex = Math.min(...timelineState.bufferedGroups);
+		} else {
+			let foundIndex = -1;
+			for (let i = 0; i < currentLyricGroups.length; i++) {
+				if (currentLyricGroups[i]?.startTime >= time) {
+					foundIndex = i;
+					break;
+				}
+			}
+			timelineState.scrollToIndex =
+				foundIndex === -1 ? currentLyricGroups.length : foundIndex;
+		}
+
+		// 就地启用/停用对应歌词行
+		for (const id of this.tempRemovedHotIds) {
+			if (!timelineState.bufferedGroups.has(id))
+				currentLyricGroups[id]?.disable();
+		}
+		for (const id of this.tempRemovedBufferedIds) {
+			if (!timelineState.bufferedGroups.has(id))
+				currentLyricGroups[id]?.disable();
+		}
+		for (const id of timelineState.hotGroups) {
+			currentLyricGroups[id]?.enable();
+		}
+
+		// 重新计算间奏信息
+		this.updateInterludeState(time, timelineState.scrollToIndex);
+
+		timelineState.lastCurrentTime = time;
+
+		// Seek 需要重排与重置滚动
+		return { shouldLayout: true, shouldResetScroll: true };
+	}
+
+	/**
+	 * 根据当前时间与给定的基准行，计算间奏区间状态
+	 */
+	private updateInterludeState(
+		currentTime: number,
+		currentIndex: number,
+	): void {
+		const time = currentTime + 20;
+		const groups = this.currentLyricGroups;
+
+		const checkGap = (k: number): PlayerInterlude | undefined => {
+			if (k < -1 || k >= groups.length - 1) return undefined;
+
+			const prevGroup = k === -1 ? null : groups[k];
+			const nextGroup = groups[k + 1];
+
+			const gapStart = prevGroup ? prevGroup.endTime : 0;
+			const gapEnd = Math.max(gapStart, nextGroup.startTime - 250);
+
+			if (gapEnd - gapStart < 4000) return undefined;
+
+			if (gapEnd > time && gapStart < time) {
+				return {
+					startTime: Math.max(gapStart, time),
+					endTime: gapEnd,
+					anchorLineIndex: k,
+					isNextDuet: nextGroup.mainLine.getLine().isDuet,
+				};
+			}
+			return undefined;
+		};
+
+		this.timelineState.activeInterlude =
+			checkGap(currentIndex - 1) ||
+			checkGap(currentIndex) ||
+			checkGap(currentIndex + 1);
+	}
+
+	/**
+	 * 处理正常播放时的时间线推导
+	 */
+	private syncForPlayback(time: number): {
+		shouldLayout: boolean;
+		shouldResetScroll: boolean;
+	} {
+		const { timelineState, currentLyricGroups } = this;
+		let shouldLayout = false;
+
+		this.tempAddedIds.length = 0;
+		this.tempRemovedHotIds.length = 0;
+		this.tempRemovedBufferedIds.length = 0;
+
+		// 检索已经过期的热行
+		for (const lastHotId of timelineState.hotGroups) {
+			const group = currentLyricGroups[lastHotId];
+			if (!group || time < group.startTime || group.endTime <= time) {
+				timelineState.hotGroups.delete(lastHotId);
+				this.tempRemovedHotIds.push(lastHotId);
+			}
+		}
+
+		// TODO: 用滑动窗口和二分查找优化性能
+		for (let id = 0; id < currentLyricGroups.length; id++) {
+			const group = currentLyricGroups[id];
+			if (
+				group &&
+				group.startTime <= time &&
+				group.endTime > time &&
+				!timelineState.hotGroups.has(id)
+			) {
+				timelineState.hotGroups.add(id);
+				this.tempAddedIds.push(id);
+			}
+		}
+
+		// 检索应该被移除的缓冲行
+		for (const id of timelineState.bufferedGroups) {
+			if (!timelineState.hotGroups.has(id)) {
+				this.tempRemovedBufferedIds.push(id);
+			}
+		}
+
+		if (this.tempAddedIds.length > 0) {
+			for (const id of this.tempAddedIds) {
+				timelineState.bufferedGroups.add(id);
+				currentLyricGroups[id]?.enable();
+			}
+			for (const id of this.tempRemovedBufferedIds) {
+				timelineState.bufferedGroups.delete(id);
+				currentLyricGroups[id]?.disable();
+			}
+			if (timelineState.bufferedGroups.size > 0) {
+				timelineState.scrollToIndex = Math.min(...timelineState.bufferedGroups);
+			}
+			shouldLayout = true;
+		} else if (
+			this.tempRemovedBufferedIds.length > 0 &&
+			this.tempRemovedBufferedIds.length === timelineState.bufferedGroups.size
+		) {
+			for (const id of timelineState.bufferedGroups) {
+				if (timelineState.hotGroups.has(id)) continue;
+				timelineState.bufferedGroups.delete(id);
+				currentLyricGroups[id]?.disable();
+			}
+			shouldLayout = true;
+		}
+
+		// 整首歌播放完毕后聚焦到底栏
+		if (
+			timelineState.bufferedGroups.size === 0 &&
+			currentLyricGroups.length > 0
+		) {
+			const lastGroup = currentLyricGroups[currentLyricGroups.length - 1];
+			if (time >= lastGroup.endTime) {
+				const targetIndex = this.hasBottomContent
+					? currentLyricGroups.length
+					: currentLyricGroups.length - 1;
+				if (timelineState.scrollToIndex !== targetIndex) {
+					timelineState.scrollToIndex = targetIndex;
+					shouldLayout = true;
+				}
+			}
+		}
+
+		// 更新间奏状态
+		const prevInterlude = timelineState.activeInterlude;
+		this.updateInterludeState(time, timelineState.scrollToIndex);
+		const currInterlude = timelineState.activeInterlude;
+
+		if (
+			(!prevInterlude && currInterlude) ||
+			(prevInterlude && !currInterlude) ||
+			(prevInterlude &&
+				currInterlude &&
+				prevInterlude.anchorLineIndex !== currInterlude.anchorLineIndex)
+		) {
+			shouldLayout = true;
+		}
+
+		timelineState.lastCurrentTime = time;
+
+		return { shouldLayout, shouldResetScroll: false };
+	}
+
+	/**
+	 * 更新歌词纵向滚动动画的弹簧参数。
+	 *
+	 * 其策略为：
+	 * - seeking 或间奏时使用更稳定的固定参数
+	 * - 普通播放时根据相邻歌词的时间间隔动态调整 stiffness / damping
+	 */
+	private updateSpringParams(isInterludeActive: boolean): void {
+		if (!this.getEnableSpring() || this.currentLyricGroups.length === 0) {
+			return;
+		}
+
+		const { scrollToIndex, isSeeking } = this.timelineState;
+
+		if (isSeeking || isInterludeActive) {
+			this.setLinePosYSpringParams({ stiffness: 90, damping: 15 });
+			return;
+		}
+
+		const currentGroup = this.currentLyricGroups[scrollToIndex];
+		const prevGroup = this.currentLyricGroups[scrollToIndex - 1];
+
+		if (!currentGroup || !prevGroup) {
+			return;
+		}
+
+		const interval = currentGroup.startTime - prevGroup.startTime;
+		const MIN_INTERVAL = 100;
+		const MAX_INTERVAL = 800;
+		const clampedInterval = clamp(interval, MIN_INTERVAL, MAX_INTERVAL);
+
+		const MAX_STIFFNESS = 220;
+		const MIN_STIFFNESS = 170;
+
+		let ratio =
+			1 - (clampedInterval - MIN_INTERVAL) / (MAX_INTERVAL - MIN_INTERVAL);
+		ratio = ratio ** 0.2;
+
+		const targetStiffness =
+			MIN_STIFFNESS + ratio * (MAX_STIFFNESS - MIN_STIFFNESS);
+		const dampingMultiplier = 2.2;
+		const targetDamping = Math.sqrt(targetStiffness) * dampingMultiplier;
+
+		this.setLinePosYSpringParams({
+			stiffness: targetStiffness,
+			damping: targetDamping,
 		});
-
-		const bottomEl = this.bottomLine.getElement();
-		const hasBottomContent = bottomEl.innerHTML.trim().length > 0;
-		const commitResult = commitPlayerTimeState({
-			timelineState: timelineState,
-			time,
-			currentGroups: this.currentLyricGroups,
-			hasBottomContent,
-			stateResult,
-		});
-
-		for (const id of commitResult.groupsToDisable)
-			this.currentLyricGroups[id]?.disable();
-
-		for (const id of commitResult.groupsToEnable)
-			this.currentLyricGroups[id]?.enable();
-
-		if (commitResult.shouldResetScroll) this.resetScroll();
-		if (commitResult.shouldLayout) this.calcLayout();
 	}
 
 	/**
@@ -523,8 +1057,6 @@ export abstract class LyricPlayerBase
 	 * 函数即可让歌词通过动画移动到目标位置。
 	 *
 	 * 函数有一个 `force` 参数，用于指定是否强制修改布局，也就是不经过动画直接调整元素位置和大小。
-	 *
-	 * 此函数还有一个 `reflow` 参数，用于指定是否需要重新计算布局
 	 *
 	 * 因为计算布局必定会导致浏览器重排布局，所以会大幅度影响流畅度和性能，故请只在以下情况下将其​设置为 true：
 	 *
@@ -536,34 +1068,24 @@ export abstract class LyricPlayerBase
 	 * @param force 是否绕过弹簧效果强制更新位置
 	 */
 	async calcLayout(sync = false, force = false): Promise<void> {
-		const interlude = computeCurrentInterlude({
-			currentTime: this.timelineState.currentTime,
-			scrollToIndex: this.timelineState.scrollToIndex,
-			currentGroups: this.currentLyricGroups,
-		});
+		const interlude = this.timelineState.activeInterlude;
 		const isInterludeActive = !!interlude;
+		const currentIsSeeking = this.timelineState.isSeeking;
 
 		if (
 			this.layoutState.targetAlignIndex !== this.timelineState.scrollToIndex ||
-			this.layoutState.lastInterludeState !== isInterludeActive
+			this.layoutState.lastInterludeState !== isInterludeActive ||
+			this.layoutState.lastIsSeeking !== currentIsSeeking
 		) {
 			this.layoutState.lastInterludeState = isInterludeActive;
-
-			const springParams = computeLinePosYSpringParams({
-				enabled: this.getEnableSpring(),
-				currentGroups: this.currentLyricGroups,
-				scrollToIndex: this.timelineState.scrollToIndex,
-				isSeeking: this.timelineState.isSeeking,
-				isInterludeActive,
-			});
-			if (springParams.shouldUpdate && springParams.params) {
-				this.setLinePosYSpringParams(springParams.params);
-			}
+			this.layoutState.lastIsSeeking = currentIsSeeking;
+			this.updateSpringParams(isInterludeActive);
 		}
 
 		let curPos = -this.scrollState.scrollOffset;
 		const targetAlignIndex = this.timelineState.scrollToIndex;
 		let isNextDuet = false;
+
 		if (interlude) {
 			isNextDuet = interlude.isNextDuet;
 		} else {
@@ -575,11 +1097,10 @@ export abstract class LyricPlayerBase
 		const totalInterludeHeight =
 			this.layoutState.interludeDotsSize[1] + dotMargin * 2;
 
-		if (interlude) {
-			if (interlude.anchorLineIndex !== -1) {
-				curPos -= totalInterludeHeight;
-			}
+		if (interlude && interlude.anchorLineIndex !== -1) {
+			curPos -= totalInterludeHeight;
 		}
+
 		// 避免一开始就让所有歌词行挤在一起
 		const LINE_HEIGHT_FALLBACK = this.size[1] / 5;
 		const scrollOffset = this.currentLyricGroups
@@ -626,12 +1147,10 @@ export abstract class LyricPlayerBase
 
 		this.currentLyricGroups.forEach((group, i) => {
 			const hasBuffered = this.timelineState.bufferedGroups.has(i);
-
 			const shouldShowDots = interlude && i === interlude.anchorLineIndex + 1;
 
 			if (!setDots && shouldShowDots) {
 				setDots = true;
-
 				curPos += dotMargin;
 
 				let targetX = 0;
@@ -651,27 +1170,55 @@ export abstract class LyricPlayerBase
 				curPos += dotMargin;
 			}
 
-			const presentation = computeGroupPresentation({
-				groupIndex: i,
-				scrollToIndex: this.timelineState.scrollToIndex,
-				latestIndex,
-				hasBuffered,
-				hidePassedLines: this.hidePassedLines,
-				isPlaying: this.timelineState.isPlaying,
-				isNonDynamic: this.isNonDynamic,
-				enableBlur: this.enableBlur,
-				isUserScrolling: this.scrollState.isUserScrolling,
-				isCompact: window.innerWidth <= 1024,
-				interlude,
-			});
+			const isActive =
+				hasBuffered ||
+				(i >= this.timelineState.scrollToIndex && i < latestIndex);
+
+			let blurLevel = 0;
+			if (this.enableBlur && !this.scrollState.isUserScrolling && !isActive) {
+				blurLevel = 1;
+				if (i < this.timelineState.scrollToIndex) {
+					blurLevel += Math.abs(this.timelineState.scrollToIndex - i) + 1;
+				} else {
+					blurLevel += Math.abs(
+						i - Math.max(this.timelineState.scrollToIndex, latestIndex),
+					);
+				}
+				if (window.innerWidth <= 1024) {
+					blurLevel *= 0.8;
+				}
+			}
+
+			let targetOpacity: number;
+
+			if (this.hidePassedLines) {
+				if (
+					i <
+						(interlude
+							? interlude.anchorLineIndex + 1
+							: this.timelineState.scrollToIndex) &&
+					this.timelineState.isPlaying
+				) {
+					// 为了避免浏览器优化，这里使用了一个极小但不为零的值（几乎不可见）
+					targetOpacity = 1e-4;
+				} else if (hasBuffered) {
+					targetOpacity = 0.85;
+				} else {
+					targetOpacity = this.isNonDynamic ? 0.2 : 1;
+				}
+			} else if (hasBuffered) {
+				targetOpacity = 0.85;
+			} else {
+				targetOpacity = this.isNonDynamic ? 0.2 : 1;
+			}
 
 			group.setTransform(
 				curPos,
 				force,
 				delay,
-				presentation.isActive,
-				presentation.targetOpacity,
-				presentation.blurLevel,
+				isActive,
+				targetOpacity,
+				blurLevel,
 			);
 
 			curPos += this.lyricGroupSize.get(group)?.[1] ?? LINE_HEIGHT_FALLBACK;
@@ -681,19 +1228,31 @@ export abstract class LyricPlayerBase
 				if (i >= this.timelineState.scrollToIndex) baseDelay /= 1.05;
 			}
 		});
+
 		this.scrollState.scrollBoundary.maxOffset =
 			curPos + this.scrollState.scrollOffset - this.size[1] / 2;
 
 		const bottomIndex = this.currentLyricGroups.length;
-		const finalBottomBlur = computeLineBlur({
-			enableBlur: this.enableBlur,
-			isUserScrolling: this.scrollState.isUserScrolling,
-			isActive: isBottomFocused,
-			itemIndex: bottomIndex,
-			scrollToIndex: this.timelineState.scrollToIndex,
-			latestIndex,
-			isCompact: window.innerWidth <= 1024,
-		});
+
+		let finalBottomBlur = 0;
+		if (
+			this.enableBlur &&
+			!this.scrollState.isUserScrolling &&
+			!isBottomFocused
+		) {
+			finalBottomBlur = 1;
+			if (bottomIndex < this.timelineState.scrollToIndex) {
+				finalBottomBlur +=
+					Math.abs(this.timelineState.scrollToIndex - bottomIndex) + 1;
+			} else {
+				finalBottomBlur += Math.abs(
+					bottomIndex - Math.max(this.timelineState.scrollToIndex, latestIndex),
+				);
+			}
+			if (window.innerWidth <= 1024) {
+				finalBottomBlur *= 0.8;
+			}
+		}
 
 		this.bottomLine.setTransform(0, curPos, finalBottomBlur, force, delay);
 	}
@@ -795,8 +1354,16 @@ export abstract class LyricPlayerBase
 	 * 请在用户完成滚动点击跳转歌词时调用本事件再调用 `calcLayout` 以正确滚动到目标位置
 	 */
 	resetScroll(): void {
-		resetPlayerScrollState(this.scrollState);
-		clearTimeout(this.scrolledHandler);
+		if (this._inertiaRafId) {
+			cancelAnimationFrame(this._inertiaRafId);
+			this._inertiaRafId = 0;
+		}
+
+		clearTimeout(this._scrolledHandler);
+
+		this.scrollState.isScrolled = false;
+		this.scrollState.scrollOffset = 0;
+		this.scrollState.isUserScrolling = false;
 	}
 	/**
 	 * 获取当前歌词数组
@@ -844,7 +1411,20 @@ export abstract class LyricPlayerBase
 		return this.element;
 	}
 	dispose(): void {
+		this.element.removeEventListener("touchstart", this.onTouchStart);
+		this.element.removeEventListener("touchmove", this.onTouchMove);
+		this.element.removeEventListener("touchend", this.onTouchEnd);
+		this.element.removeEventListener("wheel", this.onWheel);
+
+		if (this._inertiaRafId) {
+			cancelAnimationFrame(this._inertiaRafId);
+			this._inertiaRafId = 0;
+		}
+
+		clearTimeout(this._scrolledHandler);
+
 		this.element.remove();
+		this.bottomLineObserver.disconnect();
 		window.removeEventListener("pageshow", this.onPageShow);
 		window.removeEventListener("pagehide", this.onPageHide);
 	}
