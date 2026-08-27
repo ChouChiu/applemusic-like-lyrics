@@ -3,13 +3,15 @@
  * 已经部署好所有组件的歌词播放器组件，在正确设置所有的 Jotai 状态后可以开箱即用
  */
 
-import type { OptimizeLyricOptions } from "@applemusic-like-lyrics/core";
+import {
+	type BaseRenderer,
+	IsolationRenderer,
+	type OptimizeLyricOptions,
+} from "@applemusic-like-lyrics/core";
 import {
 	BackgroundRender,
 	LyricPlayer,
 	type LyricPlayerRef,
-	MeshGradientRenderer,
-	PixiRenderer,
 } from "@applemusic-like-lyrics/react";
 import structuredClone from "@ungap/structured-clone";
 import classNames from "classnames";
@@ -18,6 +20,7 @@ import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import {
 	type FC,
 	type HTMLProps,
+	useCallback,
 	useEffect,
 	useLayoutEffect,
 	useMemo,
@@ -72,6 +75,7 @@ import {
 	enableLyricTranslationLineAtom,
 	hideLyricViewAtom,
 	isLyricPageOpenedAtom,
+	isolationRendererOptionsAtom,
 	LyricSizePreset,
 	lyricBackgroundFPSAtom,
 	lyricBackgroundRendererAtom,
@@ -85,6 +89,7 @@ import {
 	lyricWordFadeWidthAtom,
 	PlayerControlsType,
 	playerControlsTypeAtom,
+	resolveBackgroundRenderer,
 	showBottomControlAtom,
 	showMusicAlbumAtom,
 	showMusicArtistsAtom,
@@ -537,6 +542,15 @@ export const PrebuiltLyricPlayer: FC<PrebuiltLyricPlayerProps> = ({
 	const coverElRef = useRef<HTMLDivElement>(null);
 	const [layoutEl, setLayoutEl] = useState<HTMLDivElement | null>(null);
 	const backgroundRenderer = useAtomValue(lyricBackgroundRendererAtom);
+	const isolationRendererOptions = useAtomValue(isolationRendererOptionsAtom);
+	const configureBackgroundRenderer = useCallback(
+		(renderer: BaseRenderer) => {
+			if (renderer instanceof IsolationRenderer) {
+				renderer.setOptions(isolationRendererOptions);
+			}
+		},
+		[isolationRendererOptions],
+	);
 	const showBottomControl = useAtomValue(showBottomControlAtom);
 
 	const cssBackgroundProperty = useAtomValue(cssBackgroundPropertyAtom);
@@ -620,12 +634,11 @@ export const PrebuiltLyricPlayer: FC<PrebuiltLyricPlayerProps> = ({
 							fps={lyricBackgroundFPS}
 							renderer={
 								typeof backgroundRenderer.renderer === "string"
-									? backgroundRenderer.renderer === "pixi"
-										? PixiRenderer
-										: MeshGradientRenderer
+									? resolveBackgroundRenderer(backgroundRenderer.renderer)
 									: backgroundRenderer.renderer
 							}
 							staticMode={lyricBackgroundStaticMode || !isLyricPageOpened}
+							configureRenderer={configureBackgroundRenderer}
 							style={{
 								zIndex: -1,
 							}}

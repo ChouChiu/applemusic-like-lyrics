@@ -1,5 +1,8 @@
 import {
+	type BaseRenderer,
 	DomLyricPlayer,
+	IsolationRenderer,
+	type IsolationRendererOptions,
 	type LyricPlayerBase,
 	MeshGradientRenderer,
 	PixiRenderer,
@@ -322,18 +325,63 @@ export type LyricBackgroundRenderer = {
 	renderer?: BackgroundRenderProps["renderer"] | string;
 };
 
+/** 一个可选背景渲染器的注册项。 */
+export interface BackgroundRendererEntry {
+	/** 渲染器类。 */
+	readonly renderer: {
+		new (canvas: HTMLCanvasElement): BaseRenderer;
+	};
+	/** 当前环境是否支持，不支持时会回落到网格渐变渲染器。 */
+	readonly isSupported: () => boolean;
+}
+
+/**
+ * 所有可选的背景渲染器。
+ *
+ * 这里是字符串标识与渲染器类之间唯一的映射表，持久化配置与实际装配都从这里
+ * 取，新增渲染器只需要往这张表里加一项。`"css-bg"` 不在表内，它不是渲染器，
+ * 而是直接用 CSS 背景的特例。
+ */
+export const BACKGROUND_RENDERERS: Readonly<
+	Record<string, BackgroundRendererEntry>
+> = {
+	mesh: {
+		renderer: MeshGradientRenderer,
+		isSupported: () => true,
+	},
+	pixi: {
+		renderer: PixiRenderer,
+		isSupported: () => true,
+	},
+	isolation: {
+		renderer: IsolationRenderer,
+		isSupported: () => IsolationRenderer.isSupported(),
+	},
+};
+
+/** 背景渲染器配置在 localStorage 中的键名。 */
+export const LYRIC_BACKGROUND_RENDERER_STORAGE_KEY =
+	"amll-react-full.lyricBackgroundRenderer";
+
+/**
+ * 把字符串标识解析成渲染器类。
+ *
+ * 未知的标识、以及当前环境不支持的渲染器，都会回落到网格渐变渲染器。
+ */
+export const resolveBackgroundRenderer = (
+	id: string,
+): BackgroundRenderProps["renderer"] => {
+	const entry = BACKGROUND_RENDERERS[id];
+	if (entry?.isSupported()) return entry.renderer;
+	return MeshGradientRenderer;
+};
+
 const getInitialBackgroundRenderer = (): LyricBackgroundRenderer => {
 	const savedRenderer = localStorage.getItem(
-		"amll-react-full.lyricBackgroundRenderer",
+		LYRIC_BACKGROUND_RENDERER_STORAGE_KEY,
 	);
-	switch (savedRenderer) {
-		case "pixi":
-			return { renderer: PixiRenderer };
-		case "css-bg":
-			return { renderer: "css-bg" };
-		default:
-			return { renderer: MeshGradientRenderer };
-	}
+	if (savedRenderer === "css-bg") return { renderer: "css-bg" };
+	return { renderer: resolveBackgroundRenderer(savedRenderer ?? "mesh") };
 };
 
 /**
@@ -341,6 +389,24 @@ const getInitialBackgroundRenderer = (): LyricBackgroundRenderer => {
  */
 export const lyricBackgroundRendererAtom: PrimitiveAtom<LyricBackgroundRenderer> =
 	atom<LyricBackgroundRenderer>(getInitialBackgroundRenderer());
+
+/**
+ * Isolation 背景渲染器的专属选项
+ *
+ * 仅在背景渲染器为 Isolation 时生效
+ */
+export const isolationRendererOptionsAtom: WritableAtom<
+	IsolationRendererOptions,
+	[
+		| IsolationRendererOptions
+		| ((prev: IsolationRendererOptions) => IsolationRendererOptions)
+		| typeof RESET,
+	],
+	void
+> = atomWithStorage<IsolationRendererOptions>(
+	"amll-react-full.isolationRendererOptions",
+	{ ...IsolationRenderer.defaultOptions },
+);
 
 /**
  * 当背景渲染器设置为纯色或CSS背景时，使用此值
