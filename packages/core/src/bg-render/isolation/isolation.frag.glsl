@@ -1,17 +1,30 @@
 // WebGL1 port of Storyteller-Studios/Cirrus' IsolationEffect.
-// The three random values are re-rolled per album by IsolationRenderer, so a
-// cover gets a stable composition while different covers do not share a layout.
-
-#ifdef GL_FRAGMENT_PRECISION_HIGH
+// The random values and flow parameters are re-rolled per album by
+// IsolationRenderer, so a cover gets a stable composition while different
+// covers do not share a layout.
+//
+// Everything that is constant for a whole draw call -- the sRGB to OkLab
+// conversion of the four colors, and the randomised flow parameters -- is
+// computed on the CPU and uploaded as uniforms instead of being recomputed per
+// fragment.
+//
+// highp is required rather than optional: u_time grows without bound and the
+// noise hash amplifies it by ~44000, which mediump's 10 significant bits cannot
+// carry. IsolationRenderer.isSupported() refuses environments without highp
+// fragment precision, so this shader simply fails to compile there instead of
+// silently rendering a broken picture.
 precision highp float;
-#else
-precision mediump float;
-#endif
 
 uniform vec2 u_resolution;
 uniform float u_time;
+// The four gradient colors, already converted to OkLab by the CPU.
 uniform vec3 u_colors[4];
 uniform vec3 u_random;
+// x = ripple frequency, y = ripple amplitude divisor,
+// z = flow speed (sign carries the direction), w = gradient axis tilt in radians
+uniform vec4 u_flowParams;
+// Extra jitter added to the noise-driven gradient angle, in radians.
+uniform float u_angleJitter;
 uniform bool u_enableLightWave;
 uniform bool u_enableDithering;
 
@@ -54,43 +67,15 @@ float gradientNoise(vec2 point) {
 	return 0.5 + 0.5 * mix(lower, upper, eased.y);
 }
 
-float random01(float seed) {
-	return fract(sin(seed * 12.9898 + 78.233) * 43758.5453);
-}
-
 float smoothstepRange(float edge0, float edge1, float value) {
 	float amount = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
 	return amount * amount * (3.0 - 2.0 * amount);
-}
-
-float decodeSrgb(float channel) {
-	return channel <= 0.04045
-		? channel / 12.92
-		: pow((channel + 0.055) / 1.055, 2.4);
 }
 
 float encodeSrgb(float channel) {
 	return channel <= 0.0031308
 		? 12.92 * channel
 		: 1.055 * pow(max(channel, 0.0), 1.0 / 2.4) - 0.055;
-}
-
-vec3 srgbToOkLab(vec3 color) {
-	color = clamp(color, 0.0, 1.0);
-	vec3 linearColor = vec3(
-		decodeSrgb(color.r),
-		decodeSrgb(color.g),
-		decodeSrgb(color.b)
-	);
-	float l = dot(linearColor, vec3(0.4122214708, 0.5363325363, 0.0514459929));
-	float m = dot(linearColor, vec3(0.2119034982, 0.6806995451, 0.1073969566));
-	float s = dot(linearColor, vec3(0.0883024619, 0.2817188376, 0.6299787005));
-	vec3 roots = pow(max(vec3(l, m, s), vec3(0.0)), vec3(1.0 / 3.0));
-	return vec3(
-		dot(roots, vec3(0.2104542553, 0.7936177850, -0.0040720468)),
-		dot(roots, vec3(1.9779984951, -2.4285922050, 0.4505937099)),
-		dot(roots, vec3(0.0259040371, 0.7827717662, -0.8086757660))
-	);
 }
 
 vec3 okLabToSrgb(vec3 color) {
@@ -182,7 +167,6 @@ void main() {
 	vec2 resolution = max(u_resolution, vec2(1.0));
 	vec2 uv = gl_FragCoord.xy / resolution;
 	vec2 gradientPoint = uv - 0.5;
-	float seed = dot(u_random, vec3(1.0, 7.31, 13.17));
 	float degree = gradientNoise(
 		vec2(
 			u_time * 0.1 + u_random.x * 0.07,
@@ -190,35 +174,24 @@ void main() {
 		)
 	);
 	float noiseAngle = ((degree - 0.5) * 720.0 + 180.0) * PI / 180.0;
-	gradientPoint = rotatePoint(
-		gradientPoint,
-		noiseAngle + (random01(seed + 0.1) - 0.5) * 0.3
-	);
+	gradientPoint = rotatePoint(gradientPoint, noiseAngle + u_angleJitter);
 
-	float frequency = mix(4.5, 5.5, random01(seed + 1.1));
-	float amplitude = mix(22.0, 29.0, random01(seed + 2.1));
-	float direction = random01(seed + 3.1) < 0.5 ? -1.0 : 1.0;
-	float speed = u_time * mix(0.65, 0.85, random01(seed + 4.1)) * direction;
+	float frequency = u_flowParams.x;
+	float amplitude = u_flowParams.y;
+	float speed = u_time * u_flowParams.z;
 	gradientPoint.x += sin(gradientPoint.y * frequency + speed) / amplitude;
 	gradientPoint.y +=
 		sin(gradientPoint.x * frequency * 1.5 + speed) / (amplitude * 0.5);
 
-	vec3 color1 = srgbToOkLab(u_colors[0]);
-	vec3 color2 = srgbToOkLab(u_colors[1]);
-	vec3 color3 = srgbToOkLab(u_colors[2]);
-	vec3 color4 = srgbToOkLab(u_colors[3]);
-	float rotatedX = rotatePoint(
-		gradientPoint,
-		(-5.0 + (random01(seed + 5.1) - 0.5) * 12.0) * PI / 180.0
-	).x;
+	float rotatedX = rotatePoint(gradientPoint, u_flowParams.w).x;
 	vec3 upperLayer = mix(
-		color1,
-		color2,
+		u_colors[0],
+		u_colors[1],
 		smoothstepRange(-0.3, 0.2, rotatedX)
 	);
 	vec3 lowerLayer = mix(
-		color3,
-		color4,
+		u_colors[2],
+		u_colors[3],
 		smoothstepRange(-0.3, 0.2, rotatedX)
 	);
 	vec3 okLabColor = mix(
