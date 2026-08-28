@@ -9,6 +9,8 @@
  * 与原实现的唯一差异是随机源：原版用全局 `Random`，这里改用按直方图内容播种的
  * mulberry32，使得同一张封面每次都得到完全相同的调色板，避免重启应用后背景配色
  * 发生肉眼可见的漂移。
+ *
+ * @see https://github.com/Storyteller-Studios/Impressionist/blob/master/Impressionist/Implementations/KMeansPaletteGenerator.cs
  */
 
 import {
@@ -45,7 +47,7 @@ export function createRandom(seed: number): RandomSource {
 export function seedFromHistogram(entries: readonly ColorCount[]): number {
 	let hash = 0x811c9dc5;
 	for (const { color, count } of entries) {
-		for (const value of [color[0], color[1], color[2], count]) {
+		for (const value of [...color, count]) {
 			hash ^= Math.round(value) & 0xffff;
 			hash = Math.imul(hash, 0x01000193) >>> 0;
 		}
@@ -54,7 +56,7 @@ export function seedFromHistogram(entries: readonly ColorCount[]): number {
 }
 
 function isNotNearWhite(color: ColorVec3): boolean {
-	return color[0] <= 250 || color[1] <= 250 || color[2] <= 250;
+	return color.some((channel) => channel <= 250);
 }
 
 function filterOrFallback(
@@ -91,7 +93,7 @@ function toLabEntries(entries: readonly ColorCount[]): ColorCount[] {
 }
 
 function colorsEqual(a: ColorVec3, b: ColorVec3): boolean {
-	return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+	return a.every((value, i) => value === b[i]);
 }
 
 function findNearestCenterIndex(
@@ -201,9 +203,7 @@ function kMeansCluster(
 		const shuffled = entries.map((entry) => entry.color);
 		for (let i = shuffled.length - 1; i > 0; i--) {
 			const j = Math.floor(random() * (i + 1));
-			const tmp = shuffled[i];
-			shuffled[i] = shuffled[j];
-			shuffled[j] = tmp;
+			[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
 		}
 		centers = shuffled.slice(0, clusterCount);
 	}

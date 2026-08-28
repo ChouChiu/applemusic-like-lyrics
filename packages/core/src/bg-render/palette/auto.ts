@@ -4,6 +4,8 @@
  *
  * 逐行移植自 Storyteller-Studios/Impressionist（MIT）的
  * `Impressionist/Implementations/AutoPaletteGenerator.cs`。
+ *
+ * @see https://github.com/Storyteller-Studios/Impressionist/blob/master/Impressionist/Implementations/AutoPaletteGenerator.cs
  */
 
 import { rgbToLab } from "./color-utilities.ts";

@@ -5,6 +5,8 @@
  * 逐行移植自 Storyteller-Studios/Impressionist（MIT）的
  * `Impressionist/Implementations/OctTreePaletteGenerator.cs`，
  * 其本身衍生自 bacowan/cSharpColourQuantization。
+ *
+ * @see https://github.com/Storyteller-Studios/Impressionist/blob/master/Impressionist/Implementations/OctTreePaletteGenerator.cs
  */
 
 import {

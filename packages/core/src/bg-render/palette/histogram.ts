@@ -73,14 +73,12 @@ export function buildColorHistogram(
 		counts.set(key, (counts.get(key) ?? 0) + 1);
 	}
 
-	const entries: ColorCount[] = [];
-	for (const [key, count] of counts) {
+	return Array.from(counts, ([key, count]) => {
 		const color: ColorVec3 = [
 			(key >> 16) & 0xff,
 			(key >> 8) & 0xff,
 			key & 0xff,
 		];
-		entries.push({ color, count });
-	}
-	return entries;
+		return { color, count };
+	});
 }

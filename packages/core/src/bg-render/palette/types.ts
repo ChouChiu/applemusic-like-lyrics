@@ -8,6 +8,9 @@
  *
  * 颜色一律用 `[x, y, z]` 三元组表示。在 RGB 空间时分量范围是 [0, 255]，
  * 与 C# 原实现的 `Vector3` 约定保持一致；在 LAB 空间时则是 L/a/b 的原始取值。
+ *
+ * @see https://github.com/Storyteller-Studios/Impressionist/blob/master/Impressionist/Abstractions/HSVColor.cs
+ * @see https://github.com/Storyteller-Studios/Impressionist/blob/master/Impressionist/Abstractions/PaletteResult.cs
  */
 
 /** 一个颜色向量，语义随所处色彩空间而定。 */
