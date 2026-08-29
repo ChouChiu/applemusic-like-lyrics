@@ -21,6 +21,7 @@ export {
 	rgbToHsv,
 	rgbToLab,
 	rgbToXyz,
+	srgbToOkLab,
 	xyzToLab,
 	xyzToRgb,
 	yToLStar,

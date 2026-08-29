@@ -16,11 +16,11 @@ import {
 import { BaseRenderer } from "../base.ts";
 import { GLProgram } from "../gl-program.ts";
 import {
-	channelToLinear,
 	createPaletteFromImage,
 	type PaletteAlgorithm,
+	srgbToOkLab,
 } from "../palette/index.ts";
-import { isWebGL1Supported } from "../support.ts";
+import { isHighpFragmentSupported, isWebGL1Supported } from "../support.ts";
 import isolationFragShader from "./isolation.frag.glsl?raw";
 import isolationVertShader from "./isolation.vert.glsl?raw";
 
@@ -57,87 +57,25 @@ function lerp(from: number, to: number, amount: number): number {
 }
 
 /**
- * 把一个 sRGB 颜色转成 OkLab 并写进 `out` 的指定偏移，分量取值均为 [0, 1]。
+ * 把一组 sRGB 颜色转成着色器要的 OkLab 缓冲，四个颜色的分量首尾相接。
  *
- * 着色器在 OkLab 空间做感知均匀的混色，转换本身对整个 draw call 是常量，所以放
- * 在 CPU 上每帧算四次，而不是丢给片元着色器每像素算四次。JS 侧的调色板过渡也因
- * 此和着色器落在同一个色彩空间里，换封面时的中间色不会发暗发浊。
+ * 着色器在 OkLab 空间做感知均匀的混色，而这个转换对整个 draw call 是常量，所以
+ * 只在换封面时算一次，不必丢给片元着色器每像素算四次。JS 侧的调色板过渡也因此
+ * 和着色器落在同一个色彩空间里，换封面时的中间色不会发暗发浊。
  */
-function writeSrgbAsOkLab(
-	out: Float32Array,
-	offset: number,
-	red: number,
-	green: number,
-	blue: number,
-): void {
-	const linearRed = channelToLinear(red);
-	const linearGreen = channelToLinear(green);
-	const linearBlue = channelToLinear(blue);
-	const l = Math.cbrt(
-		0.4122214708 * linearRed +
-			0.5363325363 * linearGreen +
-			0.0514459929 * linearBlue,
-	);
-	const m = Math.cbrt(
-		0.2119034982 * linearRed +
-			0.6806995451 * linearGreen +
-			0.1073969566 * linearBlue,
-	);
-	const s = Math.cbrt(
-		0.0883024619 * linearRed +
-			0.2817188376 * linearGreen +
-			0.6299787005 * linearBlue,
-	);
-	out[offset] = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
-	out[offset + 1] = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
-	out[offset + 2] = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
-}
-
 function toOkLabBuffer(
 	colors: readonly (readonly [number, number, number])[],
 ): Float32Array {
 	const buffer = new Float32Array(COLOR_COUNT * 3);
 	for (let i = 0; i < COLOR_COUNT; i++) {
 		const [red, green, blue] = colors[i];
-		writeSrgbAsOkLab(buffer, i * 3, red, green, blue);
+		buffer.set(srgbToOkLab([red, green, blue]), i * 3);
 	}
 	return buffer;
 }
 
 /** {@link DEFAULT_COLORS} 的 OkLab 形式，着色器要的就是这个。 */
 const DEFAULT_OKLAB_COLORS = toOkLabBuffer(DEFAULT_COLORS);
-
-let highpFragmentSupport: boolean | undefined;
-
-/**
- * WebGL1 的片元着色器是否支持 highp，结果只探测一次。
- *
- * 着色器里 `u_time` 会一直单调累加，而噪声哈希又是 `sin(...) * 43758.5453`
- * 这种把误差放大四万倍的写法。mediump 只有 10 位有效数，播放几分钟后时间项就会
- * 量化到肉眼可见的台阶，哈希本身也会退化成条带 —— 与其默默给出破图，不如直接判
- * 定为不支持。
- */
-function isHighpFragmentSupported(): boolean {
-	if (highpFragmentSupport !== undefined) return highpFragmentSupport;
-	highpFragmentSupport = false;
-	try {
-		const canvas = document.createElement("canvas");
-		canvas.width = 1;
-		canvas.height = 1;
-		const gl = canvas.getContext("webgl");
-		if (!gl) return highpFragmentSupport;
-		const format = gl.getShaderPrecisionFormat(
-			gl.FRAGMENT_SHADER,
-			gl.HIGH_FLOAT,
-		);
-		// 探测用的上下文用完立刻释放，免得白占一个 WebGL 上下文名额
-		gl.getExtension("WEBGL_lose_context")?.loseContext();
-		highpFragmentSupport = (format?.precision ?? 0) > 0;
-	} catch {
-		highpFragmentSupport = false;
-	}
-	return highpFragmentSupport;
-}
 
 export class IsolationRenderer extends BaseRenderer {
 	/**
@@ -200,9 +138,10 @@ export class IsolationRenderer extends BaseRenderer {
 
 	private readonly randomValues = new Float32Array(3);
 	/**
-	 * 整帧恒定的渐变流动参数，依次是波纹频率、波纹幅度、流动速度（已含方向）与
-	 * 渐变轴倾角（弧度）。原实现是在片元着色器里用随机哈希现算的，但它们对整个
-	 * draw call 都是常量，挪到 CPU 上每帧算一次即可。
+	 * 渐变流动参数，依次是波纹频率、波纹幅度、流动速度（已含方向）与渐变轴倾角
+	 * （弧度）。原实现是在片元着色器里用随机哈希现算的，但它们对整个 draw call
+	 * 都是常量，挪到 CPU 上由 {@link rollRandomParameters} 随机一次即可 —— 这里
+	 * 含随机量，若真的逐帧重算，画面会逐帧剧烈跳变。
 	 */
 	private readonly flowParams = new Float32Array(4);
 	/** 渐变轴叠加在噪声角度上的抖动，单位弧度，同样是整帧常量。 */
@@ -279,6 +218,9 @@ export class IsolationRenderer extends BaseRenderer {
 		}
 		this.currentWidth = 0;
 		this.currentHeight = 0;
+		// 丢失期间没有走过帧循环，不重置的话恢复后第一帧的 frameDelta 会被钳到
+		// 上限，让 frameTime 与调色板过渡进度一起突跳
+		this.resetFrameClock();
 		this.requestTick();
 	};
 
@@ -307,10 +249,17 @@ export class IsolationRenderer extends BaseRenderer {
 
 	/** 调整渲染器选项，会立即生效。 */
 	setOptions(patch: Partial<IsolationRendererOptions>): void {
+		// 逐字段取值而不是对象展开：展开会把 `{ lightWave: undefined }` 里的
+		// undefined 也照搬过来，把已有配置抹成空值
+		const previous = this.options;
+		const next: IsolationRendererOptions = {
+			lightWave: patch.lightWave ?? previous.lightWave,
+			dithering: patch.dithering ?? previous.dithering,
+			paletteAlgorithm: patch.paletteAlgorithm ?? previous.paletteAlgorithm,
+		};
 		const algorithmChanged =
-			patch.paletteAlgorithm !== undefined &&
-			patch.paletteAlgorithm !== this.options.paletteAlgorithm;
-		this.options = { ...this.options, ...patch };
+			next.paletteAlgorithm !== previous.paletteAlgorithm;
+		this.options = next;
 		if (algorithmChanged && this.albumSource) {
 			this.updatePaletteFromSource(this.albumSource, true);
 		}
@@ -338,12 +287,9 @@ export class IsolationRenderer extends BaseRenderer {
 		}
 		for (let i = 0; i < COLOR_COUNT; i++) {
 			const [red, green, blue] = palette[this.paletteOrder[i]];
-			writeSrgbAsOkLab(
-				this.nextColors,
+			this.nextColors.set(
+				srgbToOkLab([red / 255, green / 255, blue / 255]),
 				i * 3,
-				red / 255,
-				green / 255,
-				blue / 255,
 			);
 		}
 		this.transitionToColors(this.nextColors, immediate);

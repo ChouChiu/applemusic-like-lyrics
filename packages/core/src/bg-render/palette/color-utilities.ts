@@ -123,6 +123,44 @@ export function channelToLinear(value: number): number {
 	return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
 }
 
+/**
+ * 把 sRGB 颜色转换到 OkLab。
+ *
+ * 与本文件其它函数不同，入参与返回的分量取值均为 [0, 1]：OkLab 的矩阵本就定义
+ * 在归一化的线性 sRGB 上，没必要为了统一风格多做一次 255 的往返。
+ *
+ * OkLab 是感知均匀的，在它里面对两个颜色取中点不会像 sRGB 那样发暗发浊，所以
+ * 需要混色或者做颜色过渡的地方应当先转到这里来。
+ *
+ * @see https://bottosson.github.io/posts/oklab/
+ */
+export function srgbToOkLab(rgb: ColorVec3): ColorVec3 {
+	const [red, green, blue] = rgb;
+	const linearRed = channelToLinear(red);
+	const linearGreen = channelToLinear(green);
+	const linearBlue = channelToLinear(blue);
+	const l = Math.cbrt(
+		0.4122214708 * linearRed +
+			0.5363325363 * linearGreen +
+			0.0514459929 * linearBlue,
+	);
+	const m = Math.cbrt(
+		0.2119034982 * linearRed +
+			0.6806995451 * linearGreen +
+			0.1073969566 * linearBlue,
+	);
+	const s = Math.cbrt(
+		0.0883024619 * linearRed +
+			0.2817188376 * linearGreen +
+			0.6299787005 * linearBlue,
+	);
+	return [
+		0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+		1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+		0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+	];
+}
+
 export function yToLStar(y: number): number {
 	// CIE 标准写的是 0.008856 与 903.3，但 216/24389 和 24389/27 才是其本意
 	if (y <= 216 / 24389) return y * (24389 / 27);
