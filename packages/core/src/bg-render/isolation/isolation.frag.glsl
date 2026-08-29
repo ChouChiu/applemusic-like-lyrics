@@ -121,7 +121,9 @@ vec3 applyLightWave(vec3 okLabColor, vec2 uv) {
 				u_random.z
 		)
 	);
-	okLabColor.x *= 1.1 - 0.1 * wave3;
+	// 取色不再压暗，纯白封面的 L 能到 1.0，乘完必须钳住：让 L 溢出再靠末尾的
+	// RGB 钳位收场会逐通道削顶，把色相也一起改掉
+	okLabColor.x = clamp(okLabColor.x * (1.1 - 0.1 * wave3), 0.0, 1.0);
 	return okLabToSrgb(okLabColor);
 }
 
