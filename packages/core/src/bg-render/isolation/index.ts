@@ -16,6 +16,7 @@ import {
 import { BaseRenderer } from "../base.ts";
 import { GLProgram } from "../gl-program.ts";
 import {
+	type ColorVec3,
 	createPaletteFromImage,
 	type PaletteAlgorithm,
 	srgbToOkLab,
@@ -44,6 +45,11 @@ const COLOR_COUNT = 4;
 /** 加载封面失败时的重试次数，与其它渲染器保持一致。 */
 const ALBUM_RETRY_TIMES = 5;
 
+/** 背景亮度软压缩的拐点，OkLab 的 L 低于这里的颜色原样保留。 */
+const LIGHTNESS_KNEE = 0.5;
+/** 软压缩所逼近的 OkLab 亮度上限，纯白最终也只会落到这个值附近。 */
+const LIGHTNESS_CEILING = 0.72;
+
 /** 还没拿到封面时用的中性深色配色，分量取值 [0, 1] 的 sRGB。 */
 const DEFAULT_COLORS: readonly (readonly [number, number, number])[] = [
 	[0.09, 0.09, 0.11],
@@ -54,6 +60,29 @@ const DEFAULT_COLORS: readonly (readonly [number, number, number])[] = [
 
 function lerp(from: number, to: number, amount: number): number {
 	return from + (to - from) * amount;
+}
+
+/**
+ * 把一个 sRGB 颜色转成 OkLab，并顺手把亮度收一收。
+ *
+ * 取色沿用 Impressionist 的行为：封面整体偏亮时，四个主色会被过滤成清一色的亮
+ * 色。当作强调色没问题，但铺满全屏当背景就太刺眼，所以这里补一条收拢高光的曲
+ * 线 —— {@link LIGHTNESS_KNEE} 以下原样保留，以上按指数逼近
+ * {@link LIGHTNESS_CEILING}，且在拐点处斜率恰为 1。因此不必按封面明暗分两套
+ * 处理：深色封面本就落在拐点以下，不会被压得更闷，明暗之间也不存在突变。
+ *
+ * 只动 OkLab 的 L，色度分量 a、b 原封不动，压暗不会改变色相与彩度的关系。
+ */
+function toBackgroundOkLab(rgb: ColorVec3): ColorVec3 {
+	const okLab = srgbToOkLab(rgb);
+	const lightness = okLab[0];
+	if (lightness > LIGHTNESS_KNEE) {
+		const headroom = LIGHTNESS_CEILING - LIGHTNESS_KNEE;
+		okLab[0] =
+			LIGHTNESS_KNEE +
+			headroom * (1 - Math.exp((LIGHTNESS_KNEE - lightness) / headroom));
+	}
+	return okLab;
 }
 
 /**
@@ -69,7 +98,7 @@ function toOkLabBuffer(
 	const buffer = new Float32Array(COLOR_COUNT * 3);
 	for (let i = 0; i < COLOR_COUNT; i++) {
 		const [red, green, blue] = colors[i];
-		buffer.set(srgbToOkLab([red, green, blue]), i * 3);
+		buffer.set(toBackgroundOkLab([red, green, blue]), i * 3);
 	}
 	return buffer;
 }
@@ -288,7 +317,7 @@ export class IsolationRenderer extends BaseRenderer {
 		for (let i = 0; i < COLOR_COUNT; i++) {
 			const [red, green, blue] = palette[this.paletteOrder[i]];
 			this.nextColors.set(
-				srgbToOkLab([red / 255, green / 255, blue / 255]),
+				toBackgroundOkLab([red / 255, green / 255, blue / 255]),
 				i * 3,
 			);
 		}
