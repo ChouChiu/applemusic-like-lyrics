@@ -17,6 +17,7 @@ import { createThemeColor } from "./kmeans.ts";
 import type {
 	ColorCount,
 	ColorVec3,
+	PaletteIntent,
 	PaletteResult,
 	ThemeColorResult,
 } from "./types.ts";
@@ -253,12 +254,18 @@ class OctreePaletteQuantizer {
 	}
 }
 
-/** 生成调色板，对应 C# 的 `OctTreePaletteGenerator.CreatePalette`。 */
+/**
+ * 生成调色板，对应 C# 的 `OctTreePaletteGenerator.CreatePalette`。
+ *
+ * `intent` 见 {@link PaletteIntent}：默认的 `"accent"` 沿用 Impressionist 的行为，
+ * 铺满全屏的背景应当传 `"dominant"`。
+ */
 export function createOctTreePalette(
 	sourceColors: readonly ColorCount[],
 	clusterCount: number,
 	themeColor: ThemeColorResult = createThemeColor(sourceColors, false, true),
 	ignoreWhite = false,
+	intent: PaletteIntent = "accent",
 ): PaletteResult {
 	const quantizer = new OctreePaletteQuantizer();
 	const effectiveIgnoreWhite = sourceColors.length === 1 ? false : ignoreWhite;
@@ -266,6 +273,8 @@ export function createOctTreePalette(
 	const filteredEntries = sourceColors.filter((entry) => {
 		const [r, g, b] = entry.color;
 		if (effectiveIgnoreWhite && r > 250 && g > 250 && b > 250) return false;
+		// 明暗过滤是强调色的取向，dominant 下只剩上面的忽略纯白
+		if (intent === "dominant") return true;
 		return themeColor.colorIsDark
 			? paletteRgbLStarIsDark(entry.color)
 			: paletteRgbLStarIsLight(entry.color);

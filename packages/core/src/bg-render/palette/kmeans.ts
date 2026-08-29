@@ -24,6 +24,7 @@ import {
 import type {
 	ColorCount,
 	ColorVec3,
+	PaletteIntent,
 	PaletteResult,
 	ThemeColorResult,
 } from "./types.ts";
@@ -273,7 +274,12 @@ export function createThemeColor(
 	return { color, colorIsDark: rgbLStarIsDark(color) };
 }
 
-/** 生成调色板，对应 C# 的 `KMeansPaletteGenerator.CreatePalette`。 */
+/**
+ * 生成调色板，对应 C# 的 `KMeansPaletteGenerator.CreatePalette`。
+ *
+ * `intent` 见 {@link PaletteIntent}：默认的 `"accent"` 沿用 Impressionist 的行为，
+ * 铺满全屏的背景应当传 `"dominant"`。
+ */
 export function createKMeansPalette(
 	sourceColors: readonly ColorCount[],
 	clusterCount: number,
@@ -281,6 +287,7 @@ export function createKMeansPalette(
 	ignoreWhite = false,
 	toLab = false,
 	useKMeansPP = false,
+	intent: PaletteIntent = "accent",
 	random: RandomSource = createRandom(seedFromHistogram(sourceColors)),
 ): PaletteResult {
 	let effectiveIgnoreWhite = ignoreWhite;
@@ -292,6 +299,10 @@ export function createKMeansPalette(
 
 	const colorIsDark = themeColor.colorIsDark;
 	let entries = filterOrFallback(sourceColors, (entry) => {
+		// 明暗过滤是强调色的取向，dominant 下只剩 ignoreWhite 那一层
+		if (intent === "dominant") {
+			return !effectiveIgnoreWhite || isNotNearWhite(entry.color);
+		}
 		if (colorIsDark) return paletteRgbLStarIsDark(entry.color);
 		if (!effectiveIgnoreWhite) return paletteRgbLStarIsLight(entry.color);
 		return paletteRgbLStarIsLight(entry.color) && isNotNearWhite(entry.color);

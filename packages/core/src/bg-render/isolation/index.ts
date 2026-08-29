@@ -251,6 +251,11 @@ export class IsolationRenderer extends BaseRenderer {
 		try {
 			palette = createPaletteFromImage(source, COLOR_COUNT, {
 				algorithm: this.options.paletteAlgorithm,
+				// 取色默认按强调色的取向来：只留与主题色明暗一致的候选（L* 在
+				// (40, 60) 的中间调会被整段丢掉，封面的标志色落在那儿就没了），
+				// 亮色封面还偏好更聚拢的一支。背景要的是封面本身的颜色跨度，
+				// 不是和界面的对比度
+				intent: "dominant",
 			}).palette;
 		} catch (err) {
 			// 跨域封面会让 getImageData 抛安全错误，此时保持现有配色
