@@ -67,11 +67,6 @@ float gradientNoise(vec2 point) {
 	return 0.5 + 0.5 * mix(lower, upper, eased.y);
 }
 
-float smoothstepRange(float edge0, float edge1, float value) {
-	float amount = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
-	return amount * amount * (3.0 - 2.0 * amount);
-}
-
 float encodeSrgb(float channel) {
 	return channel <= 0.0031308
 		? 12.92 * channel
@@ -90,26 +85,10 @@ vec3 okLabToSrgb(vec3 color) {
 		-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
 		-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
 	);
-	return clamp(
-		vec3(
-			encodeSrgb(linearColor.r),
-			encodeSrgb(linearColor.g),
-			encodeSrgb(linearColor.b)
-		),
-		0.0,
-		1.0
-	);
-}
-
-vec3 okLabToOkLch(vec3 color) {
-	return vec3(color.x, length(color.yz), atan(color.z, color.y));
-}
-
-vec3 okLchToOkLab(vec3 color) {
 	return vec3(
-		color.x,
-		cos(color.z) * color.y,
-		sin(color.z) * color.y
+		encodeSrgb(linearColor.r),
+		encodeSrgb(linearColor.g),
+		encodeSrgb(linearColor.b)
 	);
 }
 
@@ -117,7 +96,6 @@ vec3 applyLightWave(vec3 okLabColor, vec2 uv) {
 	vec2 point = -1.0 + 1.5 * uv;
 	float x = point.x;
 	float y = point.y;
-	vec3 okLch = okLabToOkLch(okLabColor);
 	float time = u_time * 0.2;
 	float yPhase = y / 0.3;
 	float xPhase = x / 0.2;
@@ -143,8 +121,8 @@ vec3 applyLightWave(vec3 okLabColor, vec2 uv) {
 				u_random.z
 		)
 	);
-	okLch.x = clamp(okLch.x * (1.1 - 0.1 * wave3), 0.0, 1.0);
-	return okLabToSrgb(okLchToOkLab(okLch));
+	okLabColor.x *= 1.1 - 0.1 * wave3;
+	return okLabToSrgb(okLabColor);
 }
 
 float interleavedGradientNoise(vec2 position) {
@@ -164,8 +142,7 @@ vec3 screenSpaceDither(vec2 screenPosition) {
 }
 
 void main() {
-	vec2 resolution = max(u_resolution, vec2(1.0));
-	vec2 uv = gl_FragCoord.xy / resolution;
+	vec2 uv = gl_FragCoord.xy / u_resolution;
 	vec2 gradientPoint = uv - 0.5;
 	float degree = gradientNoise(
 		vec2(
@@ -184,20 +161,11 @@ void main() {
 		sin(gradientPoint.x * frequency * 1.5 + speed) / (amplitude * 0.5);
 
 	float rotatedX = rotatePoint(gradientPoint, u_flowParams.w).x;
-	vec3 upperLayer = mix(
-		u_colors[0],
-		u_colors[1],
-		smoothstepRange(-0.3, 0.2, rotatedX)
-	);
-	vec3 lowerLayer = mix(
-		u_colors[2],
-		u_colors[3],
-		smoothstepRange(-0.3, 0.2, rotatedX)
-	);
+	float horizontal = smoothstep(-0.3, 0.2, rotatedX);
 	vec3 okLabColor = mix(
-		upperLayer,
-		lowerLayer,
-		smoothstepRange(0.5, -0.3, gradientPoint.y)
+		mix(u_colors[0], u_colors[1], horizontal),
+		mix(u_colors[2], u_colors[3], horizontal),
+		1.0 - smoothstep(-0.3, 0.5, gradientPoint.y)
 	);
 	vec3 color = u_enableLightWave
 		? applyLightWave(okLabColor, uv)

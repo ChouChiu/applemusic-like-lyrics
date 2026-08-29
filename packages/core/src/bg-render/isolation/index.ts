@@ -50,14 +50,6 @@ const LIGHTNESS_KNEE = 0.5;
 /** 软压缩所逼近的 OkLab 亮度上限，纯白最终也只会落到这个值附近。 */
 const LIGHTNESS_CEILING = 0.72;
 
-/** 还没拿到封面时用的中性深色配色，分量取值 [0, 1] 的 sRGB。 */
-const DEFAULT_COLORS: readonly (readonly [number, number, number])[] = [
-	[0.09, 0.09, 0.11],
-	[0.13, 0.13, 0.16],
-	[0.07, 0.07, 0.09],
-	[0.11, 0.11, 0.13],
-];
-
 function lerp(from: number, to: number, amount: number): number {
 	return from + (to - from) * amount;
 }
@@ -85,26 +77,25 @@ function toBackgroundOkLab(rgb: ColorVec3): ColorVec3 {
 	return okLab;
 }
 
+/** 还没拿到封面时用的中性深色配色，分量取值 [0, 1] 的 sRGB。 */
+const DEFAULT_COLORS: ColorVec3[] = [
+	[0.09, 0.09, 0.11],
+	[0.13, 0.13, 0.16],
+	[0.07, 0.07, 0.09],
+	[0.11, 0.11, 0.13],
+];
+
 /**
- * 把一组 sRGB 颜色转成着色器要的 OkLab 缓冲，四个颜色的分量首尾相接。
+ * {@link DEFAULT_COLORS} 的 OkLab 形式，四个颜色的分量首尾相接，着色器要的就是
+ * 这个。
  *
  * 着色器在 OkLab 空间做感知均匀的混色，而这个转换对整个 draw call 是常量，所以
  * 只在换封面时算一次，不必丢给片元着色器每像素算四次。JS 侧的调色板过渡也因此
  * 和着色器落在同一个色彩空间里，换封面时的中间色不会发暗发浊。
  */
-function toOkLabBuffer(
-	colors: readonly (readonly [number, number, number])[],
-): Float32Array {
-	const buffer = new Float32Array(COLOR_COUNT * 3);
-	for (let i = 0; i < COLOR_COUNT; i++) {
-		const [red, green, blue] = colors[i];
-		buffer.set(toBackgroundOkLab([red, green, blue]), i * 3);
-	}
-	return buffer;
-}
-
-/** {@link DEFAULT_COLORS} 的 OkLab 形式，着色器要的就是这个。 */
-const DEFAULT_OKLAB_COLORS = toOkLabBuffer(DEFAULT_COLORS);
+const DEFAULT_OKLAB_COLORS = new Float32Array(
+	DEFAULT_COLORS.flatMap(toBackgroundOkLab),
+);
 
 export class IsolationRenderer extends BaseRenderer {
 	/**
@@ -113,12 +104,11 @@ export class IsolationRenderer extends BaseRenderer {
 	 * 该对象也可作为配置界面的初始值；实例创建后的调整统一走
 	 * {@link setOptions}。
 	 */
-	static readonly defaultOptions: Readonly<IsolationRendererOptions> =
-		Object.freeze({
-			lightWave: false,
-			dithering: true,
-			paletteAlgorithm: "auto",
-		});
+	static readonly defaultOptions: Readonly<IsolationRendererOptions> = {
+		lightWave: false,
+		dithering: true,
+		paletteAlgorithm: "auto",
+	};
 
 	/** 当前环境是否支持该渲染器，选择渲染器前应先问一句。 */
 	static isSupported(): boolean {
@@ -186,20 +176,10 @@ export class IsolationRenderer extends BaseRenderer {
 			stencil: false,
 			powerPreference: "low-power",
 		});
-		if (!gl) {
-			this.disconnectResizeObserver();
-			throw new Error("WebGL not supported");
-		}
+		if (!gl) throw new Error("WebGL not supported");
 		this.gl = gl;
-		try {
-			this.rollRandomParameters();
-			this.initializeGLResources();
-		} catch (error) {
-			this.program?.dispose();
-			gl.getExtension("WEBGL_lose_context")?.loseContext();
-			this.disconnectResizeObserver();
-			throw error;
-		}
+		this.rollRandomParameters();
+		this.initializeGLResources();
 		canvas.addEventListener("webglcontextlost", this.onContextLost);
 		canvas.addEventListener("webglcontextrestored", this.onContextRestored);
 		this.requestTick();
@@ -222,6 +202,10 @@ export class IsolationRenderer extends BaseRenderer {
 			new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
 			gl.STATIC_DRAW,
 		);
+		// 全程只有这一个程序、这一个缓冲，顶点属性绑好之后不必逐帧重设
+		const position = this.program.attrs.a_position;
+		gl.enableVertexAttribArray(position);
+		gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
 	}
 
 	private readonly onContextLost = (event: Event): void => {
@@ -236,15 +220,7 @@ export class IsolationRenderer extends BaseRenderer {
 	private readonly onContextRestored = (): void => {
 		if (this._disposed) return;
 		this.contextLost = false;
-		try {
-			this.initializeGLResources();
-		} catch (error) {
-			// 重建失败就维持「上下文丢失」的状态，别再往一个残缺的上下文上画
-			this.contextLost = true;
-			this.program?.dispose();
-			console.error("Failed to restore WebGL resources", error);
-			return;
-		}
+		this.initializeGLResources();
 		this.currentWidth = 0;
 		this.currentHeight = 0;
 		// 丢失期间没有走过帧循环，不重置的话恢复后第一帧的 frameDelta 会被钳到
@@ -293,11 +269,6 @@ export class IsolationRenderer extends BaseRenderer {
 			this.updatePaletteFromSource(this.albumSource, true);
 		}
 		this.requestTick();
-	}
-
-	/** 读取当前选项。 */
-	getOptions(): IsolationRendererOptions {
-		return { ...this.options };
 	}
 
 	private updatePaletteFromSource(
@@ -365,7 +336,6 @@ export class IsolationRenderer extends BaseRenderer {
 	}
 
 	private onRedraw(frameTime: number, frameDelta: number): boolean {
-		const gl = this.gl;
 		this.checkIfResize();
 		if (this.currentWidth <= 0 || this.currentHeight <= 0) return false;
 
@@ -382,12 +352,7 @@ export class IsolationRenderer extends BaseRenderer {
 		);
 		this.program.setUniform1f("u_time", frameTime / 1000);
 		this.program.setUniform3fv("u_colors[0]", this.colorBuffer);
-		this.program.setUniform3f(
-			"u_random",
-			this.randomValues[0],
-			this.randomValues[1],
-			this.randomValues[2],
-		);
+		this.program.setUniform3fv("u_random", this.randomValues);
 		this.program.setUniform4f(
 			"u_flowParams",
 			this.flowParams[0],
@@ -405,10 +370,7 @@ export class IsolationRenderer extends BaseRenderer {
 			this.options.dithering ? 1 : 0,
 		);
 
-		const position = this.program.attrs.a_position;
-		gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-		gl.enableVertexAttribArray(position);
-		gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+		const gl = this.gl;
 		gl.drawArrays(gl.TRIANGLES, 0, 6);
 
 		// 调色板过渡跑完之后才允许静态模式停下来
@@ -427,12 +389,8 @@ export class IsolationRenderer extends BaseRenderer {
 		}
 
 		if (Number.isNaN(this.lastFrameTime)) this.lastFrameTime = tickTime;
-		// 切后台回来或时钟被调整时 delta 可能异常甚至为负，钳制一下，
-		// 否则调色板过渡的进度会跑到 [0, 1] 之外，颜色被外推到饱和
-		const frameDelta = Math.min(
-			Math.max(tickTime - this.lastFrameTime, 0),
-			250,
-		);
+		// 切后台回来时 delta 会很大，封个顶，否则调色板过渡会一帧跳完
+		const frameDelta = Math.min(tickTime - this.lastFrameTime, 250);
 		this.lastFrameTime = tickTime;
 		this.lastTickTime = tickTime - (delta % interval);
 
@@ -448,9 +406,9 @@ export class IsolationRenderer extends BaseRenderer {
 	private readonly onTickBinded = this.onTick.bind(this);
 
 	private requestTick(): void {
-		if (this._disposed || this.paused || this.contextLost || this.maxFPS <= 0) {
-			return;
-		}
+		if (this._disposed || this.paused || this.contextLost) return;
+		// 写成 `!(maxFPS > 0)` 而不是 `maxFPS <= 0`，是为了连 NaN 一起挡掉
+		if (!(this.maxFPS > 0)) return;
 		if (this.tickHandle === 0) {
 			this.tickHandle = requestAnimationFrame(this.onTickBinded);
 		}
@@ -469,12 +427,7 @@ export class IsolationRenderer extends BaseRenderer {
 	}
 
 	override setFPS(fps: number): void {
-		this.maxFPS = Number.isFinite(fps) ? Math.max(0, fps) : 0;
-		if (this.maxFPS === 0) {
-			if (this.tickHandle) cancelAnimationFrame(this.tickHandle);
-			this.tickHandle = 0;
-			return;
-		}
+		this.maxFPS = fps;
 		this.resetFrameClock();
 		this.requestTick();
 	}
@@ -574,7 +527,7 @@ export class IsolationRenderer extends BaseRenderer {
 			"webglcontextrestored",
 			this.onContextRestored,
 		);
-		this.program?.dispose();
+		this.program.dispose();
 		this.gl.deleteBuffer(this.quadBuffer);
 		this.gl.getExtension("WEBGL_lose_context")?.loseContext();
 		super.dispose();

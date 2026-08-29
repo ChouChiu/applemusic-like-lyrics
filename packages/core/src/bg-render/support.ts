@@ -12,13 +12,15 @@ let webgl2Support: boolean | undefined;
 let highpFragmentSupport: boolean | undefined;
 
 /**
- * 借一个 1x1 的临时上下文跑一次 `probe`，用完立刻释放。
+ * 借一个 1x1 的临时上下文跑一次 `probe`，用完立刻释放。不传 `probe` 就只测能不
+ * 能拿到上下文。
  *
  * 拿不到上下文或者探测过程中抛错都算作不支持。
  */
 function withProbeContext(
 	contextId: "webgl" | "webgl2",
-	probe: (gl: WebGLRenderingContext | WebGL2RenderingContext) => boolean,
+	probe: (gl: WebGLRenderingContext | WebGL2RenderingContext) => boolean = () =>
+		true,
 ): boolean {
 	try {
 		const canvas = document.createElement("canvas");
@@ -42,15 +44,13 @@ function withProbeContext(
 
 /** 当前环境是否支持 WebGL1，结果只探测一次。 */
 export function isWebGL1Supported(): boolean {
-	if (webgl1Support === undefined)
-		webgl1Support = withProbeContext("webgl", () => true);
+	if (webgl1Support === undefined) webgl1Support = withProbeContext("webgl");
 	return webgl1Support;
 }
 
 /** 当前环境是否支持 WebGL2，结果只探测一次。 */
 export function isWebGL2Supported(): boolean {
-	if (webgl2Support === undefined)
-		webgl2Support = withProbeContext("webgl2", () => true);
+	if (webgl2Support === undefined) webgl2Support = withProbeContext("webgl2");
 	return webgl2Support;
 }
 
