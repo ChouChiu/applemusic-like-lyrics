@@ -3,13 +3,15 @@
  * 已经部署好所有组件的歌词播放器组件，在正确设置所有的 Jotai 状态后可以开箱即用
  */
 
-import type { OptimizeLyricOptions } from "@applemusic-like-lyrics/core";
+import {
+	type BaseRenderer,
+	IsolationRenderer,
+	type OptimizeLyricOptions,
+} from "@applemusic-like-lyrics/core";
 import {
 	BackgroundRender,
 	LyricPlayer,
 	type LyricPlayerRef,
-	MeshGradientRenderer,
-	PixiRenderer,
 } from "@applemusic-like-lyrics/react";
 import structuredClone from "@ungap/structured-clone";
 import classNames from "classnames";
@@ -18,6 +20,7 @@ import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import {
 	type FC,
 	type HTMLProps,
+	useCallback,
 	useEffect,
 	useLayoutEffect,
 	useMemo,
@@ -63,7 +66,9 @@ import {
 	onSeekPositionAtom,
 } from "../../states/callbacks";
 import {
+	CSS_BACKGROUND_RENDERER_ID,
 	cssBackgroundPropertyAtom,
+	DEFAULT_BACKGROUND_RENDERER_ID,
 	enableLyricLineBlurEffectAtom,
 	enableLyricLineScaleEffectAtom,
 	enableLyricLineSpringAnimationAtom,
@@ -72,6 +77,7 @@ import {
 	enableLyricTranslationLineAtom,
 	hideLyricViewAtom,
 	isLyricPageOpenedAtom,
+	isolationRendererOptionsAtom,
 	LyricSizePreset,
 	lyricBackgroundFPSAtom,
 	lyricBackgroundRendererAtom,
@@ -85,6 +91,7 @@ import {
 	lyricWordFadeWidthAtom,
 	PlayerControlsType,
 	playerControlsTypeAtom,
+	resolveBackgroundRenderer,
 	showBottomControlAtom,
 	showMusicAlbumAtom,
 	showMusicArtistsAtom,
@@ -537,6 +544,27 @@ export const PrebuiltLyricPlayer: FC<PrebuiltLyricPlayerProps> = ({
 	const coverElRef = useRef<HTMLDivElement>(null);
 	const [layoutEl, setLayoutEl] = useState<HTMLDivElement | null>(null);
 	const backgroundRenderer = useAtomValue(lyricBackgroundRendererAtom);
+	// 配置里存的可能是字符串标识，也可能是调用方直接塞进来的渲染器类。字符串一律
+	// 过一遍支持性检查，解析成 css-bg 时说明当前环境没有能用的渲染器，改走下面的
+	// CSS 背景分支
+	const resolvedBackgroundRenderer = useMemo(() => {
+		const configured = backgroundRenderer.renderer;
+		if (typeof configured === "string") {
+			return resolveBackgroundRenderer(configured);
+		}
+		return (
+			configured ?? resolveBackgroundRenderer(DEFAULT_BACKGROUND_RENDERER_ID)
+		);
+	}, [backgroundRenderer.renderer]);
+	const isolationRendererOptions = useAtomValue(isolationRendererOptionsAtom);
+	const configureBackgroundRenderer = useCallback(
+		(renderer: BaseRenderer) => {
+			if (renderer instanceof IsolationRenderer) {
+				renderer.setOptions(isolationRendererOptions);
+			}
+		},
+		[isolationRendererOptions],
+	);
 	const showBottomControl = useAtomValue(showBottomControlAtom);
 
 	const cssBackgroundProperty = useAtomValue(cssBackgroundPropertyAtom);
@@ -598,8 +626,7 @@ export const PrebuiltLyricPlayer: FC<PrebuiltLyricPlayerProps> = ({
 					/>
 				}
 				backgroundSlot={
-					typeof backgroundRenderer.renderer === "string" &&
-					backgroundRenderer.renderer === "css-bg" ? (
+					resolvedBackgroundRenderer === CSS_BACKGROUND_RENDERER_ID ? (
 						<div
 							style={{
 								zIndex: -1,
@@ -618,14 +645,9 @@ export const PrebuiltLyricPlayer: FC<PrebuiltLyricPlayerProps> = ({
 							lowFreqVolume={lowFreqVolume}
 							renderScale={lyricBackgroundRenderScale}
 							fps={lyricBackgroundFPS}
-							renderer={
-								typeof backgroundRenderer.renderer === "string"
-									? backgroundRenderer.renderer === "pixi"
-										? PixiRenderer
-										: MeshGradientRenderer
-									: backgroundRenderer.renderer
-							}
+							renderer={resolvedBackgroundRenderer}
 							staticMode={lyricBackgroundStaticMode || !isLyricPageOpened}
+							configureRenderer={configureBackgroundRenderer}
 							style={{
 								zIndex: -1,
 							}}

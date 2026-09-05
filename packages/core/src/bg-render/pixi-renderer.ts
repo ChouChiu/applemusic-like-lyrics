@@ -1,5 +1,5 @@
 import { Application } from "@pixi/app";
-import { Texture } from "@pixi/core";
+import { Texture, utils } from "@pixi/core";
 import { Container } from "@pixi/display";
 import { BlurFilter } from "@pixi/filter-blur";
 import { BulgePinchFilter } from "@pixi/filter-bulge-pinch";
@@ -17,6 +17,14 @@ class TimedContainer extends Container {
 }
 
 export class PixiRenderer extends BaseRenderer {
+	/**
+	 * 当前环境是否支持此渲染器
+	 */
+	static isSupported(): boolean {
+		// 询问 Pixi 是否支持而不是仓库内的 WebGL 检测，因为 Pixi 有额外的模板缓冲区要求
+		return utils.isWebGLSupported();
+	}
+
 	private app: Application;
 	private curContainer?: TimedContainer;
 	private staticMode = false;
