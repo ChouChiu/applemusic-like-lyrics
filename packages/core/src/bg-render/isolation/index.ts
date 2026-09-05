@@ -148,10 +148,20 @@ export class IsolationRenderer extends BaseRenderer {
 			stencil: false,
 			powerPreference: "low-power",
 		});
-		if (!gl) throw new Error("WebGL not supported");
+		if (!gl) {
+			this.disconnectResizeObserver();
+			throw new Error("WebGL not supported");
+		}
 		this.gl = gl;
-		this.rollRandomParameters();
-		this.initializeGLResources();
+		try {
+			this.rollRandomParameters();
+			this.initializeGLResources();
+		} catch (e) {
+			this.program?.dispose();
+			gl.getExtension("WEBGL_lose_context")?.loseContext();
+			this.disconnectResizeObserver();
+			throw e;
+		}
 		canvas.addEventListener("webglcontextlost", this.onContextLost);
 		canvas.addEventListener("webglcontextrestored", this.onContextRestored);
 		this.requestTick();
@@ -191,8 +201,14 @@ export class IsolationRenderer extends BaseRenderer {
 
 	private readonly onContextRestored = (): void => {
 		if (this._disposed) return;
+		try {
+			this.initializeGLResources();
+		} catch (e) {
+			this.program?.dispose();
+			console.error("Failed to restore WebGL resources", e);
+			return;
+		}
 		this.contextLost = false;
-		this.initializeGLResources();
 		this.currentWidth = 0;
 		this.currentHeight = 0;
 		// 丢失期间没有走过帧循环，不重置的话恢复后第一帧的 frameDelta 会被钳到
