@@ -331,27 +331,30 @@ export interface BackgroundRendererEntry {
 	readonly renderer: {
 		new (canvas: HTMLCanvasElement): BaseRenderer;
 	};
-	/** 当前环境是否支持，不支持时会回落到网格渐变渲染器。 */
+	/**
+	 * 当前环境是否支持，不支持时会按 {@link resolveBackgroundRenderer} 的顺序回落
+	 */
 	readonly isSupported: () => boolean;
 }
+
+export const CSS_BACKGROUND_RENDERER_ID = "css-bg";
+export const DEFAULT_BACKGROUND_RENDERER_ID = "mesh";
 
 /**
  * 所有可选的背景渲染器。
  *
- * 这里是字符串标识与渲染器类之间唯一的映射表，持久化配置与实际装配都从这里
- * 取，新增渲染器只需要往这张表里加一项。`"css-bg"` 不在表内，它不是渲染器，
- * 而是直接用 CSS 背景的特例。
+ * `"css-bg"` 不在表内，因为它不是渲染器，而是固定的纯色 CSS 背景
  */
 export const BACKGROUND_RENDERERS: Readonly<
 	Record<string, BackgroundRendererEntry>
 > = {
 	mesh: {
 		renderer: MeshGradientRenderer,
-		isSupported: () => true,
+		isSupported: () => MeshGradientRenderer.isSupported(),
 	},
 	pixi: {
 		renderer: PixiRenderer,
-		isSupported: () => true,
+		isSupported: () => PixiRenderer.isSupported(),
 	},
 	isolation: {
 		renderer: IsolationRenderer,
@@ -364,25 +367,35 @@ export const LYRIC_BACKGROUND_RENDERER_STORAGE_KEY =
 	"amll-react-full.lyricBackgroundRenderer";
 
 /**
- * 把字符串标识解析成渲染器类。
+ * {@link resolveBackgroundRenderer} 的结果：可以直接使用的渲染器类，或
+ * {@link CSS_BACKGROUND_RENDERER_ID} 表示不需要加载背景渲染器
+ */
+export type ResolvedBackgroundRenderer =
+	| BackgroundRendererEntry["renderer"]
+	| typeof CSS_BACKGROUND_RENDERER_ID;
+
+/**
+ * 把字符串标识解析成渲染器
  *
- * 未知的标识、以及当前环境不支持的渲染器，都会回落到网格渐变渲染器。
+ * 如果传入的渲染器标识在当前环境不支持，则会依次回退到 Mesh 渲染器和 CSS 背景
  */
 export const resolveBackgroundRenderer = (
 	id: string,
-): BackgroundRenderProps["renderer"] => {
+): ResolvedBackgroundRenderer => {
+	if (id === CSS_BACKGROUND_RENDERER_ID) return CSS_BACKGROUND_RENDERER_ID;
 	const entry = BACKGROUND_RENDERERS[id];
 	if (entry?.isSupported()) return entry.renderer;
-	return MeshGradientRenderer;
+	const fallback = BACKGROUND_RENDERERS[DEFAULT_BACKGROUND_RENDERER_ID];
+	if (fallback?.isSupported()) return fallback.renderer;
+	return CSS_BACKGROUND_RENDERER_ID;
 };
 
-const getInitialBackgroundRenderer = (): LyricBackgroundRenderer => {
-	const savedRenderer = localStorage.getItem(
-		LYRIC_BACKGROUND_RENDERER_STORAGE_KEY,
-	);
-	if (savedRenderer === "css-bg") return { renderer: "css-bg" };
-	return { renderer: resolveBackgroundRenderer(savedRenderer ?? "mesh") };
-};
+const getInitialBackgroundRenderer = (): LyricBackgroundRenderer => ({
+	renderer: resolveBackgroundRenderer(
+		localStorage.getItem(LYRIC_BACKGROUND_RENDERER_STORAGE_KEY) ??
+			DEFAULT_BACKGROUND_RENDERER_ID,
+	),
+});
 
 /**
  * 配置所使用的歌词背景渲染器

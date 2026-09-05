@@ -16,6 +16,7 @@ import {
 import { BaseRenderer } from "../base.ts";
 import { GLProgram } from "../gl-program.ts";
 import { blurImage } from "../img.ts";
+import { isWebGL1Supported } from "../support.ts";
 import { generateControlPoints } from "./cp-generate.ts";
 import { CONTROL_POINT_PRESETS } from "./cp-presets.ts";
 import meshFragShader from "./mesh.frag.glsl?raw";
@@ -673,6 +674,13 @@ interface MeshState {
 }
 
 export class MeshGradientRenderer extends BaseRenderer {
+	/**
+	 * 当前环境是否支持此渲染器
+	 */
+	static isSupported(): boolean {
+		return isWebGL1Supported();
+	}
+
 	private gl: RenderingContext;
 	private contextLost = false;
 	private albumRequestId = 0;
