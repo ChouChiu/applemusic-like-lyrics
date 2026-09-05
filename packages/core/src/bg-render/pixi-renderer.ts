@@ -5,12 +5,12 @@ import { BlurFilter } from "@pixi/filter-blur";
 import { BulgePinchFilter } from "@pixi/filter-bulge-pinch";
 import { ColorMatrixFilter } from "@pixi/filter-color-matrix";
 import { Sprite } from "@pixi/sprite";
+import { clampPositive } from "#utils/clamp.ts";
 import {
 	loadResourceFromElement,
 	loadResourceFromUrl,
 } from "../utils/resource";
 import { BaseRenderer } from "./base";
-import { clampPositive } from "#utils/clamp.ts";
 
 class TimedContainer extends Container {
 	public time = 0;

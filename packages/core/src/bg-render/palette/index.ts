@@ -21,6 +21,7 @@ export {
 	rgbToHsv,
 	rgbToLab,
 	rgbToXyz,
+	srgbToOkLab,
 	xyzToLab,
 	xyzToRgb,
 	yToLStar,
@@ -33,6 +34,7 @@ export type {
 	ColorCount,
 	ColorVec3,
 	HSVColor,
+	PaletteIntent,
 	PaletteResult,
 	ThemeColorResult,
 } from "./types.ts";
@@ -41,7 +43,7 @@ import { createAutoPalette } from "./auto.ts";
 import { buildColorHistogram, type HistogramSource } from "./histogram.ts";
 import { createKMeansPalette, createThemeColor } from "./kmeans.ts";
 import { createOctTreePalette } from "./octtree.ts";
-import type { PaletteResult } from "./types.ts";
+import type { PaletteIntent, PaletteResult } from "./types.ts";
 
 /** 取色算法。 */
 export type PaletteAlgorithm = "auto" | "kmeans" | "octtree";
@@ -56,6 +58,8 @@ export interface CreatePaletteOptions {
 	toLab?: boolean;
 	/** K-Means 是否使用 K-Means++ 初始化，默认 `false`。 */
 	useKMeansPP?: boolean;
+	/** 调色板的用途，默认 `"accent"`。见 {@link PaletteIntent}。 */
+	intent?: PaletteIntent;
 	/** 统计直方图前缩放到的最长边像素数，默认 64。 */
 	sampleSize?: number;
 }
@@ -80,6 +84,7 @@ export function createPaletteFromImage(
 		ignoreWhite = false,
 		toLab = false,
 		useKMeansPP = false,
+		intent = "accent",
 		sampleSize,
 	} = options;
 
@@ -109,6 +114,7 @@ export function createPaletteFromImage(
 				ignoreWhite,
 				toLab,
 				useKMeansPP,
+				intent,
 			);
 		}
 		case "octtree": {
@@ -118,6 +124,7 @@ export function createPaletteFromImage(
 				normalizedClusterCount,
 				themeColor,
 				ignoreWhite,
+				intent,
 			);
 		}
 		default:
@@ -127,6 +134,7 @@ export function createPaletteFromImage(
 				ignoreWhite,
 				toLab,
 				useKMeansPP,
+				intent,
 			);
 	}
 }
